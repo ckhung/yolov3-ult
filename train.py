@@ -15,16 +15,11 @@ try:  # Mixed precision training https://github.com/NVIDIA/apex
 except:
     mixed_precision = False  # not installed
 
-wdir = 'weights' + os.sep  # weights dir
-last = wdir + 'last.pt'
-best = wdir + 'best.pt'
-results_file = 'results.txt'
-
-# Hyperparameters (k-series, 57.7 mAP yolov3-spp-416) https://github.com/ultralytics/yolov3/issues/310
+# Hyperparameters (k-series, 53.3 mAP yolov3-spp-320) https://github.com/ultralytics/yolov3/issues/310
 hyp = {'giou': 3.31,  # giou loss gain
        'cls': 42.4,  # cls loss gain
        'cls_pw': 1.0,  # cls BCELoss positive_weight
-       'obj': 64.0,  # obj loss gain (*=img_size/320 if img_size != 320)
+       'obj': 40.0,  # obj loss gain (*=img_size/320 * 1.1 if img_size > 320)
        'obj_pw': 1.0,  # obj BCELoss positive_weight
        'iou_t': 0.213,  # iou training threshold
        'lr0': 0.00261,  # initial learning rate (SGD=1E-3, Adam=9E-5)
@@ -48,6 +43,7 @@ if f:
 
 
 def train():
+    global opt, data_dict
     cfg = opt.cfg
     data = opt.data
     img_size = opt.img_size
@@ -55,6 +51,20 @@ def train():
     batch_size = opt.batch_size
     accumulate = opt.accumulate  # effective bs = batch_size * accumulate = 16 * 4 = 64
     weights = opt.weights  # initial training weights
+
+    # Configure run
+    train_path = data_dict['train']
+    nc = int(data_dict['classes'])  # number of classes
+    # backup_dir = os.path.abspath(opt.bkdir) + os.sep
+    backup_dir = os.path.abspath(data_dict['backup']) + os.sep
+
+    if not os.access(backup_dir, os.W_OK):
+        print('WARNING: cannot write to backup directory, ending training '
+            + backup_dir)
+        return (0,) * 7
+    last = backup_dir + 'last.pt'
+    best = backup_dir + 'best.pt'
+    results_file = 'results.txt'
 
     if 'pw' not in opt.arc:  # remove BCELoss positive weights
         hyp['cls_pw'] = 1.
@@ -69,11 +79,6 @@ def train():
         img_sz_max = round(img_size / 32 * 1.5) - 1
         img_size = img_sz_max * 32  # initiate with maximum multi_scale size
         print('Using multi-scale %g - %g' % (img_sz_min * 32, img_size))
-
-    # Configure run
-    data_dict = parse_data_cfg(data)
-    train_path = data_dict['train']
-    nc = int(data_dict['classes'])  # number of classes
 
     # Remove previous results
     for f in glob.glob('*_batch*.jpg') + glob.glob(results_file):
@@ -103,7 +108,7 @@ def train():
     best_fitness = float('inf')
     attempt_download(weights)
     if weights.endswith('.pt'):  # pytorch format
-        # possible weights are '*.pt', 'yolov3-spp.pt', 'yolov3-tiny.pt' etc.
+        # possible weights are 'last.pt', 'yolov3-spp.pt', 'yolov3-tiny.pt' etc.
         if opt.bucket:
             os.system('gsutil cp gs://%s/last.pt %s' % (opt.bucket, last))  # download from bucket
         chkpt = torch.load(weights, map_location=device)
@@ -129,7 +134,7 @@ def train():
         del chkpt
 
     elif len(weights) > 0:  # darknet format
-        # possible weights are '*.weights', 'yolov3-tiny.conv.15',  'darknet53.conv.74' etc.
+        # possible weights are 'yolov3.weights', 'yolov3-tiny.conv.15',  'darknet53.conv.74' etc.
         cutoff = load_darknet_weights(model, weights)
 
     if opt.transfer or opt.prebias:  # transfer learning edge (yolo) layers
@@ -306,7 +311,8 @@ def train():
             print_model_biases(model)
         else:
             # Calculate mAP (always test final epoch, skip first 10 if opt.nosave)
-            if not (opt.notest or (opt.nosave and epoch < 10)) or final_epoch:
+            # if not (opt.notest or (opt.nosave and epoch < 10)) or final_epoch:
+            if final_epoch or not opt.notest:
                 with torch.no_grad():
                     results, maps = test.test(cfg,
                                               data,
@@ -334,8 +340,7 @@ def train():
             best_fitness = fitness
 
         # Save training results
-        save = (not opt.nosave) or (final_epoch and not opt.evolve) or opt.prebias
-        if save:
+        if True:
             with open(results_file, 'r') as f:
                 # Create checkpoint
                 chkpt = {'epoch': epoch,
@@ -354,9 +359,8 @@ def train():
             if best_fitness == fitness:
                 torch.save(chkpt, best)
 
-            # Save backup every 10 epochs (optional)
-            if epoch > 0 and epoch % 10 == 0:
-                torch.save(chkpt, wdir + 'backup%g.pt' % epoch)
+            if epoch > 0 and epoch % opt.bkevery == 0:
+                torch.save(chkpt, backup_dir + 'backup%03d.pt' % epoch)
 
             # Delete checkpoint
             del chkpt
@@ -366,8 +370,8 @@ def train():
     # end training
     if len(opt.name) and not opt.prebias:
         os.rename('results.txt', 'results_%s.txt' % opt.name)
-        os.rename(wdir + 'last.pt', wdir + 'last_%s.pt' % opt.name) if os.path.exists(wdir + 'last.pt') else None
-        os.rename(wdir + 'best.pt', wdir + 'best_%s.pt' % opt.name) if os.path.exists(wdir + 'best.pt') else None
+        os.rename(backup_dir + 'last.pt', backup_dir + 'last_%s.pt' % opt.name)
+        os.rename(backup_dir + 'best.pt', backup_dir + 'best_%s.pt' % opt.name) if os.path.exists(backup_dir + 'best.pt') else None
     plot_results()  # save as results.png
     print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
     dist.destroy_process_group() if torch.cuda.device_count() > 1 else None
@@ -385,7 +389,7 @@ def prebias():
     if opt.prebias:
         train()  # transfer-learn yolo biases for 1 epoch
         create_backbone(last)  # saved results as backbone.pt
-        opt.weights = wdir + 'backbone.pt'  # assign backbone
+        opt.weights = backup_dir + 'backbone.pt'  # assign backbone
         opt.prebias = False  # disable prebias
 
 
@@ -401,7 +405,9 @@ if __name__ == '__main__':
     parser.add_argument('--rect', action='store_true', help='rectangular training')
     parser.add_argument('--resume', action='store_true', help='resume training from last.pt')
     parser.add_argument('--transfer', action='store_true', help='transfer learning')
-    parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
+    # parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
+    # parser.add_argument('--bkdir', type=str, default='weights/', help='backup directory for backup*.pt')
+    parser.add_argument('--bkevery', type=int, default=10, help='save backup*.pt every ? epochs')
     parser.add_argument('--notest', action='store_true', help='only test final epoch')
     parser.add_argument('--evolve', action='store_true', help='evolve hyperparameters')
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
@@ -415,12 +421,14 @@ if __name__ == '__main__':
     parser.add_argument('--adam', action='store_true', help='use adam optimizer')
     parser.add_argument('--var', type=float, help='debug variable')
     opt = parser.parse_args()
-    opt.weights = last if opt.resume else opt.weights
+    data_dict = parse_data_cfg(opt.data)
+    backup_dir = os.path.abspath(data_dict['backup']) + os.sep
+    opt.weights = backup_dir + 'last.pt' if opt.resume else opt.weights
     print(opt)
     device = torch_utils.select_device(opt.device, apex=mixed_precision)
 
-    # scale hyp['obj'] by img_size (evolved at 512)
-    hyp['obj'] *= opt.img_size / 512.
+    # scale hyp['obj'] by img_size (evolved at 320)
+    hyp['obj'] *= opt.img_size / 320.
 
     tb_writer = None
     if not opt.evolve:  # Train normally
@@ -437,7 +445,7 @@ if __name__ == '__main__':
 
     else:  # Evolve hyperparameters (optional)
         opt.notest = True  # only test final epoch
-        opt.nosave = True  # only save final checkpoint
+        # opt.nosave = True  # only save final checkpoint
         if opt.bucket:
             os.system('gsutil cp gs://%s/evolve.txt .' % opt.bucket)  # download evolve.txt if exists
 
