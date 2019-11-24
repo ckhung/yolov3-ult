@@ -1,0 +1,6 @@
+classes=13
+train=/d/cdc/config/train.txt
+valid=/d/cdc/config/valid.txt
+names=/d/cdc/config/classes.names
+backup=/d/cdc/bu-transfer/
+eval=coco
