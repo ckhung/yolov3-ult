@@ -1,6 +1,6 @@
 classes=13
 train=/c/transfer_cfg/train.txt
 valid=/c/transfer_cfg/valid.txt
-names=/c/transfer_cfg/classes.names
+names=/c/transfer_cfg/classes.txt
 backup=/d/cdc/bu-transfer/
 eval=coco
